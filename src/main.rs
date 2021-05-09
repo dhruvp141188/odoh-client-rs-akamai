@@ -14,6 +14,8 @@ use reqwest::{
 };
 use std::env;
 use url::Url;
+use std::fs::File;
+use std::io::Read;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -21,7 +23,6 @@ const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 const QUERY_PATH: &str = "/dns-query";
-const WELL_KNOWN: &str = "/.well-known/odohconfigs";
 
 #[derive(Clone, Debug)]
 struct ClientSession {
@@ -35,7 +36,7 @@ struct ClientSession {
 
 impl ClientSession {
     /// Create a new ClientSession
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: Config, rcfile: &str) -> Result<Self> {
         let mut target = Url::parse(&config.server.target)?;
         target.set_path(QUERY_PATH);
         let proxy = if let Some(p) = &config.server.proxy {
@@ -44,12 +45,13 @@ impl ClientSession {
             None
         };
 
-        // fetch `odohconfigs` by querying well known endpoint using GET request
-        let odohconfigs = reqwest::get(&format!("{}{}", config.server.target, WELL_KNOWN))
-            .await?
-            .bytes()
-            .await?;
-        let target_config = get_supported_config(&odohconfigs)?;
+        // instead of pulling the resolver kem/kdc/aead/public key bytes from
+        // an http endpoint, as in the original code, read them from disk.
+        let mut fhandle = File::open(rcfile)?;
+        let mut filevec = Vec::new();
+        let _count = fhandle.read_to_end(&mut filevec);
+        let bytes = filevec.as_slice();
+        let target_config = get_supported_config(&bytes)?;
 
         Ok(Self {
             client: Client::new(),
@@ -144,6 +146,12 @@ async fn main() -> Result<()> {
                 .required(true)
                 .index(2),
         )
+        .arg(
+            Arg::with_name("resolverconfigfile")
+                .help("File containing target resolver kem/kdc/aead/public key in binary")
+                .required(true)
+                .index(3),
+        )
         .get_matches();
 
     let config_file = matches
@@ -152,7 +160,8 @@ async fn main() -> Result<()> {
     let config = Config::from_path(config_file)?;
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
-    let mut session = ClientSession::new(config.clone()).await?;
+    let rcfile = matches.value_of("resolverconfigfile").unwrap();
+    let mut session = ClientSession::new(config.clone(), &rcfile).await?;
     let request = session.create_request(domain, qtype)?;
     let response = session.send_request(&request).await?;
     session.parse_response(response).await?;
