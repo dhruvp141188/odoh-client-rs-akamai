@@ -5,9 +5,12 @@
 # two bytes, odoh version.
 # two bytes, total length of the rest of the file, not including these two bytes (default: 40 or hex 0028)
 # six bytes, kem/kdc/aead ids
+# two bytes, length of public key
 # 32? bytes, public key
 # 
 # for a total of 46 bytes.
+#
+# for now, we assume that the public key is 32 bytes in length.
 
 import argparse, sys
 
@@ -25,6 +28,7 @@ ODOH_VERSION_BYTES = b'\xff\x06'
 
 DEFAULT_FIRST_LEN_BYTES = b'\x00\x2c'
 DEFAULT_SECOND_LEN_BYTES = b'\x00\x28'
+DEFAULT_THIRD_LEN_BYTES = b'\x00\x20'
 
 with open(args.out, 'wb') as outfile:
     outfile.write(DEFAULT_FIRST_LEN_BYTES)
@@ -33,6 +37,7 @@ with open(args.out, 'wb') as outfile:
     outfile.write(KEM_ID_BYTES)
     outfile.write(KDF_ID_BYTES)
     outfile.write(AEAD_ID_BYTES)
+    outfile.write(DEFAULT_THIRD_LEN_BYTES)
     with open(args.file, 'rb') as infile:
         pubkeybytes = infile.read()
         assert(len(pubkeybytes) == 32)
