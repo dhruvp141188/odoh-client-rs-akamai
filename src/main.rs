@@ -10,7 +10,7 @@ use odoh_rs::protocol::{
 };
 use reqwest::{
     header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
-    Client, Response, StatusCode,
+    Client, Response, StatusCode, ClientBuilder,
 };
 use std::env;
 use url::Url;
@@ -52,9 +52,8 @@ impl ClientSession {
         let _count = fhandle.read_to_end(&mut filevec);
         let bytes = filevec.as_slice();
         let target_config = get_supported_config(&bytes)?;
-
         Ok(Self {
-            client: Client::new(),
+            client: ClientBuilder::new().danger_accept_invalid_certs(true).http2_prior_knowledge().build()?,
             target,
             proxy,
             client_secret: None,
