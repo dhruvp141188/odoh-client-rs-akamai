@@ -1,4 +1,2 @@
 [server]
-# proxy can be commented out, however this will defeat the purpose of using ODoH.
-#proxy = "https://odoh1.surfdomeinen.nl/proxy"
-target = "https://recursive10.engr.akamai.com:9853"
+target = "https://obliviousx7.r704.doh.names.test.dns.aka-mcqa.com:443"

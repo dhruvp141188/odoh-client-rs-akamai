@@ -53,7 +53,7 @@ impl ClientSession {
         let bytes = filevec.as_slice();
         let target_config = get_supported_config(&bytes)?;
         Ok(Self {
-            client: ClientBuilder::new().danger_accept_invalid_certs(true).http2_prior_knowledge().build()?,
+            client: ClientBuilder::new().danger_accept_invalid_certs(true).http2_prior_knowledge().use_rustls_tls().build()?,
             target,
             proxy,
             client_secret: None,
