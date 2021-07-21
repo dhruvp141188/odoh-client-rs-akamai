@@ -9,7 +9,7 @@ use odoh_rs::protocol::{
     ObliviousDoHQueryBody, ODOH_HTTP_HEADER,
 };
 use reqwest::{
-    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE, PROXY_AUTHORIZATION},
+    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE, PROXY_AUTHORIZATION, PRAGMA},
     Client, Response, StatusCode, ClientBuilder,
 };
 use std::env;
@@ -18,6 +18,8 @@ use std::fs::File;
 use std::io::Read;
 use serde::{Deserialize, Serialize};
 extern crate base64;
+// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::str::FromStr;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -48,7 +50,7 @@ struct Default {
     alpn: Vec<String>,
     target_host: String,
     target_path: String,
-    auth_to_target: AuthToTarget,
+    auth_to_target: Option<AuthToTarget>,
     odoh_configs: Vec<OdohConfig>,
 }
 
@@ -93,13 +95,20 @@ impl ApiSession {
         })
     }
 
-    pub async fn send_request(&mut self) -> Result<Response> {
-        let res = self.client.get(self.target.clone()).send().await?;
+    pub async fn send_request(&mut self, verbose:bool) -> Result<Response> {
+        let mut headers = HeaderMap::new();
+        if verbose {
+            headers.insert(PRAGMA, "akamai-x-cache-on, akamai-x-get-extracted-values, akamai-x-get-client-ip".parse()?);
+        }
+        let res = self.client.get(self.target.clone()).headers(headers).send().await?;
         Ok(res)
     }
 
-    pub async fn parse_response(&self, resp: Response) -> Result<ODOHConfig> {
+    pub async fn parse_response(&self, resp: Response, verbose:bool) -> Result<ODOHConfig> {
         if resp.status() != StatusCode::OK {
+            if verbose {
+                println!("-->> ODOHConfig Headers:\n{:#?}", resp.headers());
+            };
             return Err(anyhow!(
                 "query failed with response status code {}",
                 resp.status().as_u16()
@@ -107,17 +116,20 @@ impl ApiSession {
         }
         let body = resp.text().await?;
         let odoh_config : ODOHConfig = serde_json::from_str(&body)?;
+        if verbose {
+            println!("-->> ODOHConfig <<--\n{}\n", serde_json::to_string_pretty(&odoh_config).unwrap());
+        };
         Ok(odoh_config)
     }
 }
 
 impl ClientSession {
     /// Create a new ClientSession
-    pub async fn new(config: Config) -> Result<Self> {
+    pub async fn new(config: Config, verbose: bool) -> Result<Self> {
         // Make API call to get ODoHConfig
         let mut api_session = ApiSession::new(config.clone()).await?;
-        let api_response = api_session.send_request().await?;
-        let odoh_config = api_session.parse_response(api_response).await?;
+        let api_response = api_session.send_request(verbose).await?;
+        let odoh_config = api_session.parse_response(api_response, verbose).await?;
         
         // Use Target URL and Query Path from ODoHConfig
         let target_host = format!("https://{}", &odoh_config.default[0].target_host);
@@ -165,7 +177,9 @@ impl ClientSession {
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
-        headers.insert(PROXY_AUTHORIZATION, self.odoh_config.default[0].auth_to_target.auth_token.parse()?);
+        if let Some (auth_target) = self.odoh_config.default[0].auth_to_target.as_ref(){
+            headers.insert(PROXY_AUTHORIZATION, auth_target.auth_token.parse()?);
+        }
         let query = [
             (
                 "targethost",
@@ -215,19 +229,31 @@ async fn main() -> Result<()> {
                 .long("config")
                 .value_name("FILE")
                 .help("Path to the config.toml config file")
-                .takes_value(true),
+                .takes_value(true)
+                .required(true),
         )
         .arg(
             Arg::with_name("domain")
+                .short("d")
+                .long("domain")
                 .help("Domain to query")
-                .required(true)
-                .index(1),
+                .takes_value(true)
+                .required(true),
         )
         .arg(
             Arg::with_name("type")
+                .short("t")
+                .long("type")
                 .help("Query type")
-                .required(true)
-                .index(2),
+                .takes_value(true)
+                .required(true),
+        ).arg(
+            Arg::with_name("verbose")
+                .short("v")
+                .long("verbose")
+                .value_name("BOOL")
+                .help("True/False for Verbose")
+                .default_value("false")
         )
         .get_matches();
 
@@ -237,7 +263,8 @@ async fn main() -> Result<()> {
     let config = Config::from_path(config_file)?;
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
-    let mut session = ClientSession::new(config.clone()).await?;
+    let verbose:bool = bool::from_str(matches.value_of("verbose").unwrap()).unwrap();
+    let mut session = ClientSession::new(config.clone(), verbose).await?;
     let request = session.create_request(domain, qtype)?;
     let response = session.send_request(&request).await?;
     session.parse_response(response).await?;

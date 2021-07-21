@@ -1,4 +1,7 @@
 [server]
-target = "https://odoh-conf-service.default.hh.appbattery.shared.qa.akamai.com"
+#target = "https://odoh-conf-service.default.hh.appbattery.shared.qa.akamai.com"
+#cert = "/home/dpatel/workspace/client-tools/odoh_client/rama-testnet.pem"
+target = "https://config.odoh.staging.akamaiapis.net"
+cert = "/home/dpatel/workspace/client-tools/odoh_client/dpatel.pem"
 #target = "https://obliviousx7.r704.doh.names.test.dns.aka-mcqa.com:443"
-cert = "/home/dpatel/workspace/client-tools/odoh_client/rama-testnet.pem"
+
