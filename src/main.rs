@@ -39,12 +39,12 @@ struct ClientSession {
     pub query: Option<ObliviousDoHQueryBody>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct ODOHConfig {
     default: Vec<Default>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct Default {
     alpn: Vec<String>,
     target_host: String,
@@ -53,13 +53,13 @@ struct Default {
     odoh_configs: Vec<OdohConfig>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct AuthToTarget {
     header_name: String,
     auth_token: String,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 struct OdohConfig {
     config: String,
 }
@@ -124,27 +124,42 @@ impl ApiSession {
 
 impl ClientSession {
     /// Create a new ClientSession
-    pub async fn new(config: Config, verbose: bool) -> Result<Self> {
-        // Make API call to get ODoHConfig
-        let mut api_session = ApiSession::new(config.clone()).await?;
-        let api_response = api_session.send_request(verbose).await?;
-        let odoh_config = api_session.parse_response(api_response, verbose).await?;
-        
-        // Use Target URL and Query Path from ODoHConfig
-        let target_host = format!("https://{}", &odoh_config.default[0].target_host);
-        let mut target = Url::parse(&target_host)?;
-        target.set_path(&odoh_config.default[0].target_path);
-        
+    pub async fn new(config: Config, rcfile: &str, verbose: bool) -> Result<Self> {
+        let mut target = Url::parse(&config.server.target)?;
+        let target_config: ObliviousDoHConfigContents;
+        let mut odoh_config = ODOHConfig::default();
+        if rcfile.is_empty() {
+            // Make API call to get ODoHConfig
+            let mut api_session = ApiSession::new(config.clone()).await?;
+            let api_response = api_session.send_request(verbose).await?;
+            odoh_config = api_session.parse_response(api_response, verbose).await?;
+            
+            // Use Target URL and Query Path from ODoHConfig
+            let target_host = format!("https://{}", &odoh_config.default[0].target_host);
+            target = Url::parse(&target_host)?;
+            target.set_path(&odoh_config.default[0].target_path);
+            
+            let odoh = base64::decode(&odoh_config.default[0].odoh_configs[0].config).unwrap();
+            let mut bytes = [0,44].to_vec();
+            bytes.extend(odoh.iter().clone());
+            target_config = get_supported_config(&bytes)?;
+        }else{
+            target.set_path(QUERY_PATH);
+            // instead of pulling the resolver kem/kdc/aead/public key bytes from
+            // an http endpoint, as in the original code, read them from disk.
+            let mut fhandle = File::open(rcfile)?;
+            let mut filevec = Vec::new();
+            let _count = fhandle.read_to_end(&mut filevec);
+            let bytes = filevec.as_slice();
+            target_config = get_supported_config(&bytes)?;
+        };
+
         let proxy = if let Some(p) = &config.server.proxy {
             Url::parse(p).ok()
         } else {
             None
         };
-        
-        let odoh = base64::decode(&odoh_config.default[0].odoh_configs[0].config).unwrap();
-        let mut prepend = [0,44].to_vec();
-        prepend.extend(odoh.iter().clone());
-        let target_config = get_supported_config(&prepend)?;
+
         Ok(Self {
             client: ClientBuilder::new().danger_accept_invalid_certs(true).http2_prior_knowledge().use_rustls_tls().build()?,
             target,
@@ -171,13 +186,17 @@ impl ClientSession {
     /// If a proxy is specified, the request will be sent to the proxy. However, if a proxy is absent,
     /// it will be sent directly to the target. Note that not specifying a proxy effectively nullifies
     /// the entire purpose of using ODoH.
-    pub async fn send_request(&mut self, request: &[u8]) -> Result<Response> {
+    pub async fn send_request(&mut self, request: &[u8], auth: &str) -> Result<Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
-        if let Some (auth_target) = self.odoh_config.default[0].auth_to_target.as_ref(){
-            headers.insert(PROXY_AUTHORIZATION, auth_target.auth_token.parse()?);
+        if auth.is_empty(){
+            if let Some (auth_target) = self.odoh_config.default[0].auth_to_target.as_ref(){
+                headers.insert(PROXY_AUTHORIZATION, auth_target.auth_token.parse()?);
+            }   
+        }else {
+            headers.insert(PROXY_AUTHORIZATION, auth.parse()?);
         }
         let query = [
             (
@@ -228,8 +247,43 @@ async fn main() -> Result<()> {
                 .long("config")
                 .value_name("FILE")
                 .help("Path to the config.toml config file")
+                .long_help(
+"Without [ -o / --odoh ], 
+    Client will use target as ODoH API Target to get oDoH Config
+    From oDoH Config, it will get oDoH target hostname
+    Auth_Token will be used from ODoHConfig Response.
+With [ -o / --odoh ],
+    Client will use target from config_file as oDoH Target and send oDoH request
+    Auth Token needed using Argument [ -a / --auth ]"
+                )
                 .takes_value(true)
                 .required(true),
+        )
+        .arg(
+            Arg::with_name("resolverconfigfile")
+            .short("o")
+            .long("odoh")
+            .value_name("FILE")
+            .help("File containing target resolver kem/kdc/aead/public key in binary")
+            .long_help(
+"If target resolver kem/kdc/aead/public key in binary file use used,
+    Client will use target from config_file as oDoH Target and send oDoH request.
+
+Auth_Token required with Argument [ -a / --auth ]"
+            )
+            .takes_value(true)
+            .required(false),
+        )
+        .arg(
+            Arg::with_name("authtoken")
+            .short("a")
+            .long("auth")
+            .help("Auth Token to use to validate ProxyA")
+            .long_help(
+                "Auth Token is Required if [ -o / --odoh ] argument is used for resolver kem/kdc/aead/public key in binary"
+            )
+            .takes_value(true)
+            .required(false),
         )
         .arg(
             Arg::with_name("domain")
@@ -246,7 +300,8 @@ async fn main() -> Result<()> {
                 .help("Query type")
                 .takes_value(true)
                 .required(true),
-        ).arg(
+        )
+        .arg(
             Arg::with_name("verbose")
                 .short("v")
                 .long("verbose")
@@ -263,9 +318,12 @@ async fn main() -> Result<()> {
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
     let verbose:bool = bool::from_str(matches.value_of("verbose").unwrap()).unwrap();
-    let mut session = ClientSession::new(config.clone(), verbose).await?;
+    let rcfile = matches.value_of("resolverconfigfile").unwrap_or("");
+    let auth = matches.value_of("authtoken").unwrap_or("");
+
+    let mut session = ClientSession::new(config.clone(), &rcfile, verbose).await?;
     let request = session.create_request(domain, qtype)?;
-    let response = session.send_request(&request).await?;
+    let response = session.send_request(&request, &auth).await?;
     session.parse_response(response).await?;
     Ok(())
 }
