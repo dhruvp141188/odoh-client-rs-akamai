@@ -16,6 +16,7 @@ pub struct Config {
 pub struct Server {
     pub proxy: Option<String>,
     pub target: String,
+    pub cert: Option<String>,
 }
 
 impl Config {
