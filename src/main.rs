@@ -9,13 +9,15 @@ use odoh_rs::protocol::{
     ObliviousDoHQueryBody, ODOH_HTTP_HEADER,
 };
 use reqwest::{
-    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE},
+    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE, PROXY_AUTHORIZATION},
     Client, Response, StatusCode, ClientBuilder,
 };
 use std::env;
 use url::Url;
 use std::fs::File;
 use std::io::Read;
+use serde::{Deserialize, Serialize};
+extern crate base64;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
 const PKG_AUTHORS: &str = env!("CARGO_PKG_AUTHORS");
@@ -23,38 +25,119 @@ const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const PKG_DESCRIPTION: &str = env!("CARGO_PKG_DESCRIPTION");
 
 const QUERY_PATH: &str = "/dns-query";
+const API_PATH: &str = "/api/v1/odoh-config";
 
 #[derive(Clone, Debug)]
 struct ClientSession {
     pub client: Client,
     pub target: Url,
+    pub odoh_config: ODOHConfig,
     pub proxy: Option<Url>,
     pub client_secret: Option<Vec<u8>>,
     pub target_config: ObliviousDoHConfigContents,
     pub query: Option<ObliviousDoHQueryBody>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct ODOHConfig {
+    default: Vec<Default>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct Default {
+    alpn: Vec<String>,
+    target_host: String,
+    target_path: String,
+    auth_to_target: AuthToTarget,
+    odoh_configs: Vec<OdohConfig>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct AuthToTarget {
+    header_name: String,
+    auth_token: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct OdohConfig {
+    config: String,
+}
+
+#[derive(Clone, Debug)]
+struct ApiSession {
+    pub client: Client,
+    pub target: Url
+}
+
+impl ApiSession {
+    // Create a new ApiSession
+
+    pub async fn new(config: Config) -> Result<Self> {
+        let mut target = Url::parse(&config.server.target)?;
+        target.set_path(API_PATH);
+        let client;
+        // If target is not public server and needs client certificate, 
+        // Below will read cert and create client based on Identity
+        if let Some(c) = &config.server.cert {
+            let mut buf = Vec::new();
+            File::open(c)?
+                .read_to_end(&mut buf)?;
+            let id = reqwest::Identity::from_pem(&buf)?;
+            client = reqwest::Client::builder().identity(id).danger_accept_invalid_certs(true).use_rustls_tls().build()?;
+        }else {
+            client = reqwest::Client::builder().danger_accept_invalid_certs(true).use_rustls_tls().build()?;
+        };
+        Ok(Self {
+            client,
+            target
+        })
+    }
+
+    pub async fn send_request(&mut self) -> Result<Response> {
+        let res = self.client.get(self.target.clone()).send().await?;
+        Ok(res)
+    }
+
+    pub async fn parse_response(&self, resp: Response) -> Result<ODOHConfig> {
+        if resp.status() != StatusCode::OK {
+            return Err(anyhow!(
+                "query failed with response status code {}",
+                resp.status().as_u16()
+            ));
+        }
+        let body = resp.text().await?;
+        let odoh_config : ODOHConfig = serde_json::from_str(&body)?;
+        Ok(odoh_config)
+    }
+}
+
 impl ClientSession {
     /// Create a new ClientSession
-    pub async fn new(config: Config, rcfile: &str) -> Result<Self> {
-        let mut target = Url::parse(&config.server.target)?;
-        target.set_path(QUERY_PATH);
+    pub async fn new(config: Config) -> Result<Self> {
+        // Make API call to get ODoHConfig
+        let mut api_session = ApiSession::new(config.clone()).await?;
+        let api_response = api_session.send_request().await?;
+        let odoh_config = api_session.parse_response(api_response).await?;
+        
+        // Use Target URL and Query Path from ODoHConfig
+        let target_host = format!("https://{}", &odoh_config.default[0].target_host);
+        let mut target = Url::parse(&target_host)?;
+        target.set_path(&odoh_config.default[0].target_path);
+        
         let proxy = if let Some(p) = &config.server.proxy {
             Url::parse(p).ok()
         } else {
             None
         };
-
-        // instead of pulling the resolver kem/kdc/aead/public key bytes from
-        // an http endpoint, as in the original code, read them from disk.
-        let mut fhandle = File::open(rcfile)?;
-        let mut filevec = Vec::new();
-        let _count = fhandle.read_to_end(&mut filevec);
-        let bytes = filevec.as_slice();
-        let target_config = get_supported_config(&bytes)?;
+        
+        let odoh = base64::decode(&odoh_config.default[0].odoh_configs[0].config).unwrap();
+        let mut prepend = [0,44].to_vec();
+        prepend.extend(odoh.iter().clone());
+        let target_config = get_supported_config(&prepend)?;
         Ok(Self {
             client: ClientBuilder::new().danger_accept_invalid_certs(true).http2_prior_knowledge().use_rustls_tls().build()?,
             target,
+            odoh_config,
             proxy,
             client_secret: None,
             target_config,
@@ -82,6 +165,7 @@ impl ClientSession {
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
+        headers.insert(PROXY_AUTHORIZATION, self.odoh_config.default[0].auth_to_target.auth_token.parse()?);
         let query = [
             (
                 "targethost",
@@ -145,12 +229,6 @@ async fn main() -> Result<()> {
                 .required(true)
                 .index(2),
         )
-        .arg(
-            Arg::with_name("resolverconfigfile")
-                .help("File containing target resolver kem/kdc/aead/public key in binary")
-                .required(true)
-                .index(3),
-        )
         .get_matches();
 
     let config_file = matches
@@ -159,8 +237,7 @@ async fn main() -> Result<()> {
     let config = Config::from_path(config_file)?;
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
-    let rcfile = matches.value_of("resolverconfigfile").unwrap();
-    let mut session = ClientSession::new(config.clone(), &rcfile).await?;
+    let mut session = ClientSession::new(config.clone()).await?;
     let request = session.create_request(domain, qtype)?;
     let response = session.send_request(&request).await?;
     session.parse_response(response).await?;
