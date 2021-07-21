@@ -18,7 +18,6 @@ use std::fs::File;
 use std::io::Read;
 use serde::{Deserialize, Serialize};
 extern crate base64;
-// use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 
 const PKG_NAME: &str = env!("CARGO_PKG_NAME");
