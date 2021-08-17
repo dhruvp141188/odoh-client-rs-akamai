@@ -292,6 +292,7 @@ Auth_Token required with Argument [ -a / --auth ]"
             .long_help(
                 "Auth Token is Required if [ -o / --odoh ] argument is used for resolver kem/kdc/aead/public key in binary"
             )
+            .default_value("abc")
             .takes_value(true)
             .required(false),
         )
