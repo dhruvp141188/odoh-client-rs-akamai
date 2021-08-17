@@ -124,11 +124,11 @@ impl ApiSession {
 
 impl ClientSession {
     /// Create a new ClientSession
-    pub async fn new(config: Config, rcfile: &str, verbose: bool) -> Result<Self> {
+    pub async fn new(config: Config, odohkey: &str, verbose: bool) -> Result<Self> {
         let mut target = Url::parse(&config.server.target)?;
         let target_config: ObliviousDoHConfigContents;
         let mut odoh_config = ODOHConfig::default();
-        if rcfile.is_empty() {
+        if odohkey.is_empty() {
             // Make API call to get ODoHConfig
             let mut api_session = ApiSession::new(config.clone()).await?;
             let api_response = api_session.send_request(verbose).await?;
@@ -145,12 +145,19 @@ impl ClientSession {
             target_config = get_supported_config(&bytes)?;
         }else{
             target.set_path(QUERY_PATH);
-            // instead of pulling the resolver kem/kdc/aead/public key bytes from
-            // an http endpoint, as in the original code, read them from disk.
-            let mut fhandle = File::open(rcfile)?;
+            let mut odohfhandle = File::open(odohkey).expect("unable to open ODOH pubkey");
             let mut filevec = Vec::new();
-            let _count = fhandle.read_to_end(&mut filevec);
-            let bytes = filevec.as_slice();
+            // Below is the required bytes to generate odoh-config 
+            // Bytes 1-2 = Length of Odoh Config
+            // Bytes 3-4 = Odoh Version
+            // Bytes 5-6 = Length of remaining bytes
+            // Bytes 7-8 = KEM ID Bytes
+            // Bytes 9-10 = KDF ID Bytes
+            // Bytes 11-12 = AEAD ID Bytes
+            // Bytes 13-14 = 3rd Length Bytes
+            let mut bytes = [0,44,255,6,0,40,0,32,0,1,0,1,0,32].to_vec();
+            let _count = odohfhandle.read_to_end(&mut filevec);
+            bytes.extend(filevec.as_slice());
             target_config = get_supported_config(&bytes)?;
         };
 
@@ -217,8 +224,11 @@ impl ClientSession {
     }
 
     /// Parse the received response from the resolver and print the answer.
-    pub async fn parse_response(&self, resp: Response) -> Result<()> {
+    pub async fn parse_response(&self, resp: Response, verbose: bool) -> Result<()> {
         if resp.status() != StatusCode::OK {
+            if verbose {
+                println!("-->> ODOHConfig Headers:\n{:#?}", resp.headers());
+            };
             return Err(anyhow!(
                 "query failed with response status code {}",
                 resp.status().as_u16()
@@ -260,13 +270,13 @@ With [ -o / --odoh ],
                 .required(true),
         )
         .arg(
-            Arg::with_name("resolverconfigfile")
-            .short("o")
-            .long("odoh")
+            Arg::with_name("odohkey")
+            .short("k")
+            .long("key")
             .value_name("FILE")
-            .help("File containing target resolver kem/kdc/aead/public key in binary")
+            .help("File containing target resolver odoh public key")
             .long_help(
-"If target resolver kem/kdc/aead/public key in binary file use used,
+"If target resolver KMI public key file used,
     Client will use target from config_file as oDoH Target and send oDoH request.
 
 Auth_Token required with Argument [ -a / --auth ]"
@@ -282,6 +292,7 @@ Auth_Token required with Argument [ -a / --auth ]"
             .long_help(
                 "Auth Token is Required if [ -o / --odoh ] argument is used for resolver kem/kdc/aead/public key in binary"
             )
+            .default_value("abc")
             .takes_value(true)
             .required(false),
         )
@@ -318,12 +329,12 @@ Auth_Token required with Argument [ -a / --auth ]"
     let domain = matches.value_of("domain").unwrap();
     let qtype = matches.value_of("type").unwrap();
     let verbose:bool = bool::from_str(matches.value_of("verbose").unwrap()).unwrap();
-    let rcfile = matches.value_of("resolverconfigfile").unwrap_or("");
+    let odohkey = matches.value_of("odohkey").unwrap_or("");
     let auth = matches.value_of("authtoken").unwrap_or("");
 
-    let mut session = ClientSession::new(config.clone(), &rcfile, verbose).await?;
+    let mut session = ClientSession::new(config.clone(), &odohkey, verbose).await?;
     let request = session.create_request(domain, qtype)?;
     let response = session.send_request(&request, &auth).await?;
-    session.parse_response(response).await?;
+    session.parse_response(response, verbose).await?;
     Ok(())
 }
