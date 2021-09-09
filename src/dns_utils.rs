@@ -35,7 +35,7 @@ pub fn create_dns_query(domain: &str, query_type: &str) -> Result<Vec<u8>> {
 /// Parses a DNS answer from bytes and prints it
 pub fn parse_dns_answer(msg: &[u8]) -> Result<()> {
     let result = Message::from_vec(msg)?;
-    println!("Response: {:?}", result.answers());
+    println!("{:#?}", result.answers());
     Ok(())
 }
 

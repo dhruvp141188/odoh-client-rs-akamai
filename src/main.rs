@@ -9,7 +9,7 @@ use odoh_rs::protocol::{
     ObliviousDoHQueryBody, ODOH_HTTP_HEADER,
 };
 use reqwest::{
-    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE, PROXY_AUTHORIZATION, PRAGMA},
+    header::{HeaderMap, ACCEPT, CACHE_CONTROL, CONTENT_TYPE, PRAGMA},
     Client, Response, StatusCode, ClientBuilder,
 };
 use std::env;
@@ -193,18 +193,11 @@ impl ClientSession {
     /// If a proxy is specified, the request will be sent to the proxy. However, if a proxy is absent,
     /// it will be sent directly to the target. Note that not specifying a proxy effectively nullifies
     /// the entire purpose of using ODoH.
-    pub async fn send_request(&mut self, request: &[u8], auth: &str) -> Result<Response> {
+    pub async fn send_request(&mut self, request: &[u8], verbose: bool) -> Result<Response> {
         let mut headers = HeaderMap::new();
         headers.insert(CONTENT_TYPE, ODOH_HTTP_HEADER.parse()?);
         headers.insert(ACCEPT, ODOH_HTTP_HEADER.parse()?);
         headers.insert(CACHE_CONTROL, "no-cache, no-store".parse()?);
-        if auth.is_empty(){
-            if let Some (auth_target) = self.odoh_config.default[0].auth_to_target.as_ref(){
-                headers.insert(PROXY_AUTHORIZATION, auth_target.auth_token.parse()?);
-            }   
-        }else {
-            headers.insert(PROXY_AUTHORIZATION, auth.parse()?);
-        }
         let query = [
             (
                 "targethost",
@@ -214,6 +207,9 @@ impl ClientSession {
             ),
             ("targetpath", QUERY_PATH),
         ];
+        if verbose {
+            println!("-->> ODoH Request Headers:\n{:#?}", headers);
+        };
         let builder = if let Some(p) = &self.proxy {
             self.client.post(p.clone()).headers(headers).query(&query)
         } else {
@@ -226,14 +222,15 @@ impl ClientSession {
     /// Parse the received response from the resolver and print the answer.
     pub async fn parse_response(&self, resp: Response, verbose: bool) -> Result<()> {
         if resp.status() != StatusCode::OK {
-            if verbose {
-                println!("-->> ODOHConfig Headers:\n{:#?}", resp.headers());
-            };
+            println!("-->> ODoH Response Headers:\n{:#?}", resp.headers());
             return Err(anyhow!(
                 "query failed with response status code {}",
                 resp.status().as_u16()
             ));
         }
+        if verbose {
+            println!("-->> ODoH Response Headers:\n{:#?}", resp.headers());
+        };
         let data = resp.bytes().await?;
         let response_body = parse_received_response(
             &self.client_secret.clone().unwrap(),
@@ -263,8 +260,7 @@ async fn main() -> Result<()> {
     From oDoH Config, it will get oDoH target hostname
     Auth_Token will be used from ODoHConfig Response.
 With [ -o / --odoh ],
-    Client will use target from config_file as oDoH Target and send oDoH request
-    Auth Token needed using Argument [ -a / --auth ]"
+    Client will use target from config_file as oDoH Target and send oDoH request"
                 )
                 .takes_value(true)
                 .required(true),
@@ -277,22 +273,8 @@ With [ -o / --odoh ],
             .help("File containing target resolver odoh public key")
             .long_help(
 "If target resolver KMI public key file used,
-    Client will use target from config_file as oDoH Target and send oDoH request.
-
-Auth_Token required with Argument [ -a / --auth ]"
+    Client will use target from config_file as oDoH Target and send oDoH request."
             )
-            .takes_value(true)
-            .required(false),
-        )
-        .arg(
-            Arg::with_name("authtoken")
-            .short("a")
-            .long("auth")
-            .help("Auth Token to use to validate ProxyA")
-            .long_help(
-                "Auth Token is Required if [ -o / --odoh ] argument is used for resolver kem/kdc/aead/public key in binary"
-            )
-            .default_value("abc")
             .takes_value(true)
             .required(false),
         )
@@ -330,11 +312,10 @@ Auth_Token required with Argument [ -a / --auth ]"
     let qtype = matches.value_of("type").unwrap();
     let verbose:bool = bool::from_str(matches.value_of("verbose").unwrap()).unwrap();
     let odohkey = matches.value_of("odohkey").unwrap_or("");
-    let auth = matches.value_of("authtoken").unwrap_or("");
 
     let mut session = ClientSession::new(config.clone(), &odohkey, verbose).await?;
     let request = session.create_request(domain, qtype)?;
-    let response = session.send_request(&request, &auth).await?;
+    let response = session.send_request(&request, verbose).await?;
     session.parse_response(response, verbose).await?;
     Ok(())
 }
